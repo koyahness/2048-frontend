@@ -1,390 +1,357 @@
-import { Button } from "@/components/ui/button";
-import { publicClient } from "@/utils/client";
-import { GAME_CONTRACT_ADDRESS } from "@/utils/constants";
-import { post } from "@/utils/fetch";
-import { usePrivy, useWallets } from "@privy-io/react-auth";
+import {
+	usePrivy,
+	useWallets,
+	type WalletWithMetadata,
+} from "@privy-io/react-auth";
 import { ExternalLink } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 import {
-    createWalletClient,
-    custom,
-    encodeFunctionData,
-    formatEther,
-    Hex,
-    parseEther,
-    parseGwei,
+	type Address,
+	type Chain,
+	createWalletClient,
+	custom,
+	encodeFunctionData,
+	formatEther,
+	type Hex,
+	parseEther,
+	type Transport,
+	type WalletClient,
 } from "viem";
-import { waitForTransactionReceipt } from "viem/actions";
-import { monadTestnet } from "viem/chains";
+import { Button } from "@/components/ui/button";
+import { useNetwork } from "@/contexts/NetworkContext";
+import { getEstimatedFees } from "@/utils/client";
+import { GAME_CONTRACT_ADDRESS } from "@/utils/constants";
+import { post } from "@/utils/fetch";
+
+const TRANSACTION_TIMEOUT_MS = 10_000;
 
 export function useTransactions() {
-    // User and Wallet objects.
-    const { user } = usePrivy();
-    const { ready, wallets } = useWallets();
+	const { user } = usePrivy();
+	const { ready, wallets } = useWallets();
+	const { network, chain, publicClient, explorerUrl, rpcUrl } = useNetwork();
 
-    // Fetch user nonce on new login.
-    const userNonce = useRef(0);
-    const userBalance = useRef(0n);
+	const userNonce = useRef(0);
+	const userBalance = useRef(0n);
+	const userAddress = useRef("");
 
-    // Resets nonce and balance
-    async function resetNonceAndBalance() {
-        if (!user || !user.wallet) {
-            return;
-        }
+	async function resetNonceAndBalance() {
+		if (!user) {
+			return;
+		}
+		const [privyUser] = user.linkedAccounts.filter(
+			(account): account is WalletWithMetadata =>
+				account.type === "wallet" && account.walletClientType === "privy",
+		);
+		if (!privyUser || !privyUser.address) {
+			return;
+		}
+		const privyUserAddress = privyUser.address;
 
-        const nonce = await publicClient.getTransactionCount({
-            address: user.wallet.address as Hex,
-        });
-        const balance = await publicClient.getBalance({
-            address: user.wallet.address as Hex,
-        });
+		const nonce = await publicClient.getTransactionCount({
+			address: privyUserAddress as Hex,
+		});
+		const balance = await publicClient.getBalance({
+			address: privyUserAddress as Hex,
+		});
 
-        console.log("Setting nonce: ", nonce);
-        console.log("Setting balance: ", balance.toString());
+		console.log("Setting nonce: ", nonce);
+		console.log("Setting balance: ", balance.toString());
 
-        userNonce.current = nonce;
-        userBalance.current = balance;
-    }
+		userNonce.current = nonce;
+		userBalance.current = balance;
+		userAddress.current = privyUserAddress;
+	}
 
-    useEffect(() => {
-        resetNonceAndBalance();
-    }, [user]);
+	useEffect(() => {
+		resetNonceAndBalance();
+	}, [user, network]);
 
-    // Fetch provider on new login.
-    const walletClient = useRef<any>(null);
-    useEffect(() => {
-        async function getWalletClient() {
-            if (!ready || !wallets) return;
+	const walletClient = useRef<WalletClient<Transport, Chain> | null>(null);
+	useEffect(() => {
+		async function getWalletClient() {
+			if (!ready || !wallets) return;
 
-            const userWallet = wallets.find(
-                (w) => w.walletClientType == "privy"
-            );
-            if (!userWallet) return;
+			const userWallet = wallets.find((w) => w.walletClientType === "privy");
+			if (!userWallet) return;
 
-            const ethereumProvider = await userWallet.getEthereumProvider();
-            const provider = createWalletClient({
-                chain: monadTestnet,
-                transport: custom(ethereumProvider),
-            });
+			await userWallet.switchChain(chain.id);
 
-            console.log("Setting provider: ", provider);
-            walletClient.current = provider;
-        }
+			const ethereumProvider = await userWallet.getEthereumProvider();
+			const provider = createWalletClient({
+				chain,
+				transport: custom(ethereumProvider),
+			});
 
-        getWalletClient();
-    }, [user, ready, wallets]);
+			console.log("Setting provider for chain:", chain.id);
+			walletClient.current = provider;
+		}
 
-    // Sends a transaction and wait for receipt.
-    async function sendRawTransactionAndConfirm({
-        successText,
-        gas,
-        data,
-        nonce,
-        maxFeePerGas = parseGwei("50"),
-        maxPriorityFeePerGas = parseGwei("5"),
-    }: {
-        successText?: string;
-        gas: BigInt;
-        data: Hex;
-        nonce: number;
-        maxFeePerGas?: BigInt;
-        maxPriorityFeePerGas?: BigInt;
-    }) {
-        let e: Error | null = null;
+		getWalletClient();
+	}, [ready, wallets, chain]);
 
-        try {
-            // Sign and send transaction.
-            const provider = walletClient.current;
-            if (!provider) {
-                throw Error("Wallet not found.");
-            }
+	async function sendRawTransactionAndConfirm({
+		successText,
+		gas,
+		data,
+		nonce,
+	}: {
+		successText?: string;
+		gas: bigint;
+		data: Hex;
+		nonce: number;
+	}) {
+		let e: Error | null = null;
 
-            const startTime = Date.now();
-            const signedTransaction = await provider.signTransaction({
-                to: GAME_CONTRACT_ADDRESS,
-                account: user?.wallet?.address,
-                data,
-                nonce,
-                gas,
-                maxFeePerGas,
-                maxPriorityFeePerGas,
-            });
+		try {
+			const provider = walletClient.current;
+			if (!provider) {
+				throw Error("Wallet not found.");
+			}
+			const privyUserAddress = userAddress.current;
+			if (!privyUserAddress) {
+				throw Error("Privy user not found.");
+			}
 
-            const environment = import.meta.env.VITE_APP_ENVIRONMENT;
-            const rpc =
-                environment === "prod"
-                    ? import.meta.env.VITE_MONAD_RPC_URL! ||
-                      monadTestnet.rpcUrls.default.http[0]
-                    : monadTestnet.rpcUrls.default.http[0];
-            const response = await post({
-                url: rpc,
-                params: {
-                    id: 0,
-                    jsonrpc: "2.0",
-                    method: "eth_sendRawTransaction",
-                    params: [signedTransaction],
-                },
-            });
-            const time = Date.now() - startTime;
+			const startTime = Date.now();
+			const { maxFeePerGas, maxPriorityFeePerGas } = await getEstimatedFees(
+				publicClient,
+				network,
+			);
+			const signedTransaction = await provider.signTransaction({
+				to: GAME_CONTRACT_ADDRESS[network],
+				account: privyUserAddress as Address,
+				data,
+				nonce,
+				gas,
+				maxFeePerGas,
+				maxPriorityFeePerGas,
+			});
 
-            if (response.error) {
-                console.log(`Failed sent in ${time} ms`);
-                throw Error(response.error.message);
-            }
+			const receipt = await post({
+				url: rpcUrl,
+				params: {
+					id: 0,
+					jsonrpc: "2.0",
+					method: "eth_sendRawTransactionSync",
+					params: [signedTransaction, TRANSACTION_TIMEOUT_MS],
+				},
+			});
+			const time = Date.now() - startTime;
 
-            const transactionHash: Hex = response.result;
+			if (receipt.status === "reverted") {
+				console.log(`Failed confirmation in ${time} ms`);
+				throw Error(
+					`Failed to confirm transaction: ${receipt.transactionHash}`,
+				);
+			}
 
-            // Fire toast info with benchmark and transaction hash.
-            console.log(`Transaction sent in ${time} ms: ${response.result}`);
-            toast.success(`Sent transaction.`, {
-                description: `${successText} Time: ${time} ms`,
-                action: (
-                    <Button
-                        className="outline outline-white"
-                        onClick={() =>
-                            window.open(
-                                `https://testnet.monadexplorer.com/tx/${transactionHash}`,
-                                "_blank",
-                                "noopener,noreferrer"
-                            )
-                        }
-                    >
-                        <div className="flex items-center gap-1 p-1">
-                            <p>View</p>
-                            <ExternalLink className="w-4 h-4" />
-                        </div>
-                    </Button>
-                ),
-            });
+			console.log(
+				`Transaction confirmed in ${time} ms: ${receipt.transactionHash}`,
+			);
+			toast.success(`Confirmed transaction.`, {
+				description: `${successText} Time: ${time} ms`,
+				action: (
+					<Button
+						className="outline outline-white"
+						variant="ghost"
+						onClick={() =>
+							window.open(
+								`${explorerUrl}/tx/${receipt.transactionHash}`,
+								"_blank",
+								"noopener,noreferrer",
+							)
+						}
+					>
+						<div className="flex items-center gap-1 p-1">
+							<p>View</p>
+							<ExternalLink className="w-4 h-4" />
+						</div>
+					</Button>
+				),
+			});
+		} catch (error) {
+			e = error as Error;
 
-            // Confirm transaction
-            const receipt = await waitForTransactionReceipt(publicClient, {
-                hash: transactionHash,
-            });
+			toast.error(`Failed to send transaction.`, {
+				description: `Error: ${e.message}`,
+			});
+		}
 
-            if (receipt.status == "reverted") {
-                console.log(
-                    `Failed confirmation in ${Date.now() - startTime} ms`
-                );
-                throw Error(
-                    `Failed to confirm transaction: ${transactionHash}`
-                );
-            }
+		if (e) {
+			throw e;
+		}
+	}
 
-            console.log(
-                `Transaction confirmed in ${Date.now() - startTime} ms: ${
-                    response.result
-                }`
-            );
-            toast.success(`Confirmed transaction.`, {
-                description: `${successText} Time: ${
-                    Date.now() - startTime
-                } ms`,
-                action: (
-                    <Button
-                        className="outline outline-white"
-                        onClick={() =>
-                            window.open(
-                                `https://testnet.monadexplorer.com/tx/${transactionHash}`,
-                                "_blank",
-                                "noopener,noreferrer"
-                            )
-                        }
-                    >
-                        <div className="flex items-center gap-1 p-1">
-                            <p>View</p>
-                            <ExternalLink className="w-4 h-4" />
-                        </div>
-                    </Button>
-                ),
-            });
-        } catch (error) {
-            e = error as Error;
+	async function getLatestGameBoard(
+		gameId: Hex,
+	): Promise<
+		readonly [
+			readonly [
+				number,
+				number,
+				number,
+				number,
+				number,
+				number,
+				number,
+				number,
+				number,
+				number,
+				number,
+				number,
+				number,
+				number,
+				number,
+				number,
+			],
+			bigint,
+		]
+	> {
+		const [latestBoard, nextMoveNumber] = await publicClient.readContract({
+			address: GAME_CONTRACT_ADDRESS[network],
+			abi: [
+				{
+					type: "function",
+					name: "getBoard",
+					inputs: [
+						{
+							name: "gameId",
+							type: "bytes32",
+							internalType: "bytes32",
+						},
+					],
+					outputs: [
+						{
+							name: "boardArr",
+							type: "uint8[16]",
+							internalType: "uint8[16]",
+						},
+						{
+							name: "nextMoveNumber",
+							type: "uint256",
+							internalType: "uint256",
+						},
+					],
+					stateMutability: "view",
+				},
+			],
+			functionName: "getBoard",
+			args: [gameId],
+		});
 
-            toast.error(`Failed to send transaction.`, {
-                description: `Error: ${e.message}`,
-            });
-        }
+		return [latestBoard, nextMoveNumber];
+	}
 
-        if (e) {
-            throw e;
-        }
-    }
+	async function initializeGameTransaction(
+		gameId: Hex,
+		boards: readonly [bigint, bigint, bigint, bigint],
+		moves: readonly [number, number, number],
+	): Promise<void> {
+		const balance = userBalance.current;
+		if (parseFloat(formatEther(balance)) < 0.01) {
+			throw Error("Signer has insufficient balance.");
+		}
 
-    // Returns a the latest stored baord of a game as an array.
-    async function getLatestGameBoard(
-        gameId: Hex
-    ): Promise<
-        readonly [
-            readonly [
-                number,
-                number,
-                number,
-                number,
-                number,
-                number,
-                number,
-                number,
-                number,
-                number,
-                number,
-                number,
-                number,
-                number,
-                number,
-                number
-            ],
-            bigint
-        ]
-    > {
-        const [latestBoard, nextMoveNumber] = await publicClient.readContract({
-            address: GAME_CONTRACT_ADDRESS,
-            abi: [
-                {
-                    type: "function",
-                    name: "getBoard",
-                    inputs: [
-                        {
-                            name: "gameId",
-                            type: "bytes32",
-                            internalType: "bytes32",
-                        },
-                    ],
-                    outputs: [
-                        {
-                            name: "boardArr",
-                            type: "uint8[16]",
-                            internalType: "uint8[16]",
-                        },
-                        {
-                            name: "nextMoveNumber",
-                            type: "uint256",
-                            internalType: "uint256",
-                        },
-                    ],
-                    stateMutability: "view",
-                },
-            ],
-            functionName: "getBoard",
-            args: [gameId],
-        });
+		console.log("Starting game!");
 
-        return [latestBoard, nextMoveNumber];
-    }
+		const nonce = userNonce.current;
+		userNonce.current = nonce + 1;
+		userBalance.current = balance - parseEther("0.0075");
 
-    // Initializes a game. Calls `prepareGame` and `startGame`.
-    async function initializeGameTransaction(
-        gameId: Hex,
-        boards: readonly [bigint, bigint, bigint, bigint],
-        moves: readonly [number, number, number]
-    ): Promise<void> {
-        const balance = userBalance.current;
-        if (parseFloat(formatEther(balance)) < 0.01) {
-            throw Error("Signer has insufficient balance.");
-        }
+		await sendRawTransactionAndConfirm({
+			nonce: nonce,
+			successText: "Started game!",
+			gas: BigInt(150_000),
+			data: encodeFunctionData({
+				abi: [
+					{
+						type: "function",
+						name: "startGame",
+						inputs: [
+							{
+								name: "gameId",
+								type: "bytes32",
+								internalType: "bytes32",
+							},
+							{
+								name: "boards",
+								type: "uint128[4]",
+								internalType: "uint128[4]",
+							},
+							{
+								name: "moves",
+								type: "uint8[3]",
+								internalType: "uint8[3]",
+							},
+						],
+						outputs: [],
+						stateMutability: "nonpayable",
+					},
+				],
+				functionName: "startGame",
+				args: [gameId, boards, moves],
+			}),
+		});
+	}
 
-        // Sign and send transaction: start game
-        console.log("Starting game!");
+	async function playNewMoveTransaction(
+		gameId: Hex,
+		board: bigint,
+		move: number,
+		moveCount: number,
+	): Promise<void> {
+		console.log(`Playing move ${moveCount}!`);
 
-        const nonce = userNonce.current;
-        userNonce.current = nonce + 1;
-        userBalance.current = balance - parseEther("0.0075");
+		const balance = userBalance.current;
+		if (parseFloat(formatEther(balance)) < 0.01) {
+			throw Error("Signer has insufficient balance.");
+		}
 
-        await sendRawTransactionAndConfirm({
-            nonce: nonce,
-            successText: "Started game!",
-            gas: BigInt(150_000),
-            data: encodeFunctionData({
-                abi: [
-                    {
-                        type: "function",
-                        name: "startGame",
-                        inputs: [
-                            {
-                                name: "gameId",
-                                type: "bytes32",
-                                internalType: "bytes32",
-                            },
-                            {
-                                name: "boards",
-                                type: "uint128[4]",
-                                internalType: "uint128[4]",
-                            },
-                            {
-                                name: "moves",
-                                type: "uint8[3]",
-                                internalType: "uint8[3]",
-                            },
-                        ],
-                        outputs: [],
-                        stateMutability: "nonpayable",
-                    },
-                ],
-                functionName: "startGame",
-                args: [gameId, boards, moves],
-            }),
-        });
-    }
+		const nonce = userNonce.current;
+		userNonce.current = nonce + 1;
+		userBalance.current = balance - parseEther("0.005");
 
-    async function playNewMoveTransaction(
-        gameId: Hex,
-        board: bigint,
-        move: number,
-        moveCount: number
-    ): Promise<void> {
-        // Sign and send transaction: play move
-        console.log(`Playing move ${moveCount}!`);
+		await sendRawTransactionAndConfirm({
+			nonce,
+			successText: `Played move ${moveCount}`,
+			gas: BigInt(100_000),
+			data: encodeFunctionData({
+				abi: [
+					{
+						type: "function",
+						name: "play",
+						inputs: [
+							{
+								name: "gameId",
+								type: "bytes32",
+								internalType: "bytes32",
+							},
+							{
+								name: "move",
+								type: "uint8",
+								internalType: "uint8",
+							},
+							{
+								name: "resultBoard",
+								type: "uint128",
+								internalType: "uint128",
+							},
+						],
+						outputs: [],
+						stateMutability: "nonpayable",
+					},
+				],
+				functionName: "play",
+				args: [gameId, move, board],
+			}),
+		});
+	}
 
-        const balance = userBalance.current;
-        if (parseFloat(formatEther(balance)) < 0.01) {
-            throw Error("Signer has insufficient balance.");
-        }
-
-        const nonce = userNonce.current;
-        userNonce.current = nonce + 1;
-        userBalance.current = balance - parseEther("0.005");
-
-        await sendRawTransactionAndConfirm({
-            nonce,
-            successText: `Played move ${moveCount}`,
-            gas: BigInt(100_000),
-            data: encodeFunctionData({
-                abi: [
-                    {
-                        type: "function",
-                        name: "play",
-                        inputs: [
-                            {
-                                name: "gameId",
-                                type: "bytes32",
-                                internalType: "bytes32",
-                            },
-                            {
-                                name: "move",
-                                type: "uint8",
-                                internalType: "uint8",
-                            },
-                            {
-                                name: "resultBoard",
-                                type: "uint128",
-                                internalType: "uint128",
-                            },
-                        ],
-                        outputs: [],
-                        stateMutability: "nonpayable",
-                    },
-                ],
-                functionName: "play",
-                args: [gameId, move, board],
-            }),
-        });
-    }
-
-    return {
-        resetNonceAndBalance,
-        initializeGameTransaction,
-        playNewMoveTransaction,
-        getLatestGameBoard,
-    };
+	return {
+		resetNonceAndBalance,
+		initializeGameTransaction,
+		playNewMoveTransaction,
+		getLatestGameBoard,
+	};
 }

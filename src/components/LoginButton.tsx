@@ -1,84 +1,106 @@
-// Hooks
-import { useState } from "react";
-import { useLogin, useLogout, usePrivy } from "@privy-io/react-auth";
-
-// UI
+import {
+	useLogin,
+	useLogout,
+	usePrivy,
+	type WalletWithMetadata,
+} from "@privy-io/react-auth";
+import { Copy } from "lucide-react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import FunPurpleButton from "./FunPurpleButton";
 import { Button } from "./ui/button";
-import { Copy } from "lucide-react";
 
 type LoginButtonProps = {
-    resetGame: () => void;
+	resetGame: () => void;
 };
 
 export default function LoginButton({ resetGame }: LoginButtonProps) {
-    const { login } = useLogin();
-    const { logout } = useLogout();
-    const { user, authenticated } = usePrivy();
+	const { login } = useLogin();
+	const { user, authenticated } = usePrivy();
 
-    const [loginLoading, setLoginLoading] = useState(false);
+	const [loginLoading, setLoginLoading] = useState(false);
 
-    const handleLogin = async () => {
-        setLoginLoading(true);
+	const handleLogin = async () => {
+		setLoginLoading(true);
+		try {
+			login();
+			setLoginLoading(false);
+		} catch (err) {
+			console.log("Problem logging in: ", err);
+			setLoginLoading(false);
+		}
+	};
 
-        try {
-            login();
-            setLoginLoading(false);
-        } catch (err) {
-            console.log("Problem logging in: ", err);
-            setLoginLoading(false);
-        }
-    };
+	if (user && authenticated) {
+		return <FunPurpleButton text="New Game" onClick={resetGame} />;
+	}
 
-    const copyToClipboard = async () => {
-        if (user?.wallet?.address) {
-            await navigator.clipboard.writeText(user.wallet.address);
-            toast.info("Copied to clipboard.");
-        }
-    };
+	return (
+		<FunPurpleButton
+			text="Login"
+			loadingText="Creating player..."
+			isLoading={loginLoading}
+			onClick={() => handleLogin()}
+		/>
+	);
+}
 
-    const abbreviatedAddress = user?.wallet?.address
-        ? `${user.wallet.address.slice(0, 4)}...${user.wallet.address.slice(
-              -2
-          )}`
-        : "";
+export function PlayerInfo() {
+	const { logout } = useLogout();
+	const { user } = usePrivy();
 
-    return (
-        <>
-            {user && authenticated ? (
-                <div className="flex flex-col items-center">
-                    <FunPurpleButton text="New Game" onClick={resetGame} />
-                    <Button
-                        variant="ghost"
-                        className="underline"
-                        onClick={logout}
-                    >
-                        Logout
-                    </Button>
-                    <div className="flex items-center gap-2">
-                        <p>
-                            <span className="font-bold">Player</span>:{" "}
-                            {abbreviatedAddress}
-                        </p>
-                        <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-6 w-6 p-1"
-                            onClick={copyToClipboard}
-                        >
-                            <Copy className="h-4 w-4" />
-                        </Button>
-                    </div>
-                </div>
-            ) : (
-                <FunPurpleButton
-                    text="Login"
-                    loadingText="Creating player..."
-                    isLoading={loginLoading}
-                    onClick={handleLogin}
-                />
-            )}
-        </>
-    );
+	const [address, setAddress] = useState("");
+	useEffect(() => {
+		if (!user) {
+			setAddress("");
+			return;
+		}
+
+		const [privyUser] = user.linkedAccounts.filter(
+			(account): account is WalletWithMetadata =>
+				account.type === "wallet" && account.walletClientType === "privy",
+		);
+		if (!privyUser || !privyUser.address) {
+			setAddress("");
+			return;
+		}
+
+		setAddress(privyUser.address);
+	}, [user]);
+
+	const copyToClipboard = async () => {
+		if (address) {
+			await navigator.clipboard.writeText(address);
+			toast.info("Copied to clipboard.");
+		}
+	};
+
+	const abbreviatedAddress = address
+		? `${address.slice(0, 4)}...${address.slice(-2)}`
+		: "";
+
+	return (
+		<div className="flex items-center gap-1 whitespace-nowrap">
+			<span>
+				<span className="font-bold">Player</span>:
+			</span>{" "}
+			{abbreviatedAddress}
+			<Button
+				variant="ghost"
+				size="icon"
+				className="h-6 w-6 p-0.5"
+				onClick={copyToClipboard}
+			>
+				<Copy className="h-3.5 w-3.5" />
+			</Button>
+			<span className="text-gray-400 mx-1">|</span>
+			<Button
+				variant="ghost"
+				className="underline text-sm p-0 h-auto"
+				onClick={logout}
+			>
+				Logout
+			</Button>
+		</div>
+	);
 }
